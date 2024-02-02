@@ -202,7 +202,7 @@ impl Connector for PostgresConnector {
             self.conn_config.clone(),
             self.schema.clone(),
             self.batch_size,
-        );
+        ).await?;
         iterator.start(lsn).await.map_err(Into::into)
     }
 }

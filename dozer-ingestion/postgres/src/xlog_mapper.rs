@@ -1,3 +1,4 @@
+use dozer_ingestion_connector::dozer_types::chrono_tz::Tz;
 use dozer_ingestion_connector::dozer_types::types::{Field, Operation, Record};
 use postgres_protocol::message::backend::LogicalReplicationMessage::{
     Begin, Commit, Delete, Insert, Relation, Update,
@@ -55,6 +56,7 @@ impl XlogMapper {
     pub fn handle_message(
         &mut self,
         message: XLogDataBody<LogicalReplicationMessage>,
+        timezone: &Tz,
     ) -> Result<Option<MappedReplicationMessage>, PostgresConnectorError> {
         match &message.data() {
             Relation(relation) => {
@@ -75,7 +77,7 @@ impl XlogMapper {
                 let table = self.relations_map.get(&insert.rel_id()).unwrap();
                 let new_values = insert.tuple().tuple_data();
 
-                let values = Self::convert_values_to_fields(table, new_values, false)?;
+                let values = Self::convert_values_to_fields(table, new_values, timezone, false)?;
 
                 let event = Operation::Insert {
                     new: Record::new(values),
@@ -95,8 +97,8 @@ impl XlogMapper {
                 let table = self.relations_map.get(&update.rel_id()).unwrap();
                 let new_values = update.new_tuple().tuple_data();
 
-                let values = Self::convert_values_to_fields(table, new_values, false)?;
-                let old_values = Self::convert_old_value_to_fields(table, update)?;
+                let values = Self::convert_values_to_fields(table, new_values, timezone, false)?;
+                let old_values = Self::convert_old_value_to_fields(table, update, timezone)?;
 
                 let event = Operation::Update {
                     old: Record::new(old_values),
@@ -118,7 +120,7 @@ impl XlogMapper {
                 let table = self.relations_map.get(&delete.rel_id()).unwrap();
                 let key_values = delete.key_tuple().unwrap().tuple_data();
 
-                let values = Self::convert_values_to_fields(table, key_values, true)?;
+                let values = Self::convert_values_to_fields(table, key_values, timezone, true)?;
 
                 let event = Operation::Delete {
                     old: Record::new(values),
@@ -228,6 +230,7 @@ impl XlogMapper {
     fn convert_values_to_fields(
         table: &Table,
         new_values: &[TupleData],
+        timezone: &Tz,
         only_key: bool,
     ) -> Result<Vec<Field>, PostgresConnectorError> {
         let mut values: Vec<Field> = vec![];
@@ -237,12 +240,12 @@ impl XlogMapper {
                 let value = new_values.get(column.column_index).unwrap();
                 match value {
                     TupleData::Null => values.push(
-                        helper::postgres_type_to_field(None, column)
+                        helper::postgres_type_to_field(None, column, timezone)
                             .map_err(PostgresConnectorError::PostgresSchemaError)?,
                     ),
                     TupleData::UnchangedToast => {}
                     TupleData::Text(text) => values.push(
-                        helper::postgres_type_to_field(Some(text), column)
+                        helper::postgres_type_to_field(Some(text), column, timezone)
                             .map_err(PostgresConnectorError::PostgresSchemaError)?,
                     ),
                 }
@@ -257,12 +260,13 @@ impl XlogMapper {
     fn convert_old_value_to_fields(
         table: &Table,
         update: &UpdateBody,
+        timezone: &Tz,
     ) -> Result<Vec<Field>, PostgresConnectorError> {
         match table.replica_identity {
             ReplicaIdentity::Default | ReplicaIdentity::Full | ReplicaIdentity::Index => {
                 update.key_tuple().map_or_else(
-                    || Self::convert_values_to_fields(table, update.new_tuple().tuple_data(), true),
-                    |key_tuple| Self::convert_values_to_fields(table, key_tuple.tuple_data(), true),
+                    || Self::convert_values_to_fields(table, update.new_tuple().tuple_data(), timezone, true),
+                    |key_tuple| Self::convert_values_to_fields(table, key_tuple.tuple_data(), timezone, true),
                 )
             }
             ReplicaIdentity::Nothing => Ok(vec![]),

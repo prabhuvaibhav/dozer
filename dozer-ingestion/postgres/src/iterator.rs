@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use dozer_ingestion_connector::dozer_types::chrono_tz::{Tz, UTC};
 use dozer_ingestion_connector::dozer_types::log::debug;
 use dozer_ingestion_connector::utils::ListOrFilterColumns;
 use dozer_ingestion_connector::Ingestor;
@@ -22,6 +23,7 @@ pub struct Details {
     tables: Vec<PostgresTableInfo>,
     replication_conn_config: tokio_postgres::Config,
     conn_config: tokio_postgres::Config,
+    timezone: Tz,
     schema: Option<String>,
     batch_size: usize,
 }
@@ -40,7 +42,7 @@ pub struct PostgresIterator<'a> {
 
 impl<'a> PostgresIterator<'a> {
     #![allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub async fn new(
         name: String,
         publication_name: String,
         slot_name: String,
@@ -50,7 +52,20 @@ impl<'a> PostgresIterator<'a> {
         conn_config: tokio_postgres::Config,
         schema: Option<String>,
         batch_size: usize,
-    ) -> Self {
+    ) -> Result<Self, PostgresConnectorError> {
+        let mut client = helper::connect(conn_config.to_owned()).await?;
+        let mut timezone = UTC;
+        if let Some(_timezone) = client
+            .query_one("SHOW TIMEZONE;", &[])
+            .await
+            .ok()
+            .and_then(|row| row.try_get::<_, String>(0).ok())
+        {
+            timezone = _timezone.parse().unwrap_or(UTC);
+            debug!("timezone of the PostgreSQL Server is {:?}", timezone);
+        } else {
+            debug!("failed to fetch the timezone; using UTC");
+        }
         let details = Arc::new(Details {
             name,
             publication_name,
@@ -58,10 +73,11 @@ impl<'a> PostgresIterator<'a> {
             tables,
             replication_conn_config,
             conn_config,
+            timezone,
             schema,
             batch_size,
         });
-        PostgresIterator { details, ingestor }
+        Ok(PostgresIterator { details, ingestor })
     }
 }
 
@@ -161,6 +177,7 @@ impl<'a> PostgresIteratorHandler<'a> {
                 ingestor: self.ingestor,
                 schema: details.schema.clone(),
                 batch_size: details.batch_size,
+                timezone: self.details.timezone.clone(),
             };
             let tables = details
                 .tables
@@ -209,6 +226,8 @@ impl<'a> PostgresIteratorHandler<'a> {
             seq_no: 0,
             name: self.details.name.clone(),
         };
-        replicator.start(tables).await
+        replicator
+            .start(tables, &self.details.timezone)
+            .await
     }
 }

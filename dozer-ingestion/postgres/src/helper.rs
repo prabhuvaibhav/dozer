@@ -1,6 +1,7 @@
 use dozer_ingestion_connector::dozer_types::{
     bytes::Bytes,
-    chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Offset, Utc},
+    chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc},
+    chrono_tz::Tz,
     errors::types::TypeError,
     geo::Point as GeoPoint,
     json_types::{parse_json_slice, serde_json_to_json_value, JsonArray, JsonValue},
@@ -95,9 +96,19 @@ fn convert_date_with_timezone(date: String) -> Result<DateTime<FixedOffset>, Dat
     }
 }
 
+fn convert_date_given_timezone(datetime: NaiveDateTime, timezone: &Tz) -> Result<DateTime<FixedOffset>, DateConversionError> {
+    let local_datetime = match timezone.from_local_datetime(&datetime) {
+        LocalResult::None => Err(InvalidTime),
+        LocalResult::Single(date) => Ok(date),
+        LocalResult::Ambiguous(_, _) => Err(AmbiguousTimeResult),
+    };
+    local_datetime.map(|timestamp| timestamp.with_timezone(&Utc.fix()))
+}
+
 pub fn postgres_type_to_field(
     value: Option<&Bytes>,
     column: &TableColumn,
+    timezone: &Tz,
 ) -> Result<Field, PostgresSchemaError> {
     let column_type = column.r#type.clone();
     value.map_or(Ok(Field::Null), |v| match column_type {
@@ -127,15 +138,14 @@ pub fn postgres_type_to_field(
         Type::TIMESTAMP => {
             let date_string = String::from_utf8(v.to_vec())?;
 
-            Ok(Field::Timestamp(DateTime::from_naive_utc_and_offset(
-                convert_date(date_string)?,
-                Utc.fix(),
-            )))
+            Ok(convert_date_given_timezone(convert_date(date_string)?, timezone).map(Field::Timestamp)?)
         }
         Type::TIMESTAMPTZ => {
             let date_string = String::from_utf8(v.to_vec())?;
+            let local_datetime = convert_date_with_timezone(date_string);
+            let utc_datetime = local_datetime.map(|timestamp| timestamp.with_timezone(&Utc.fix()));
 
-            Ok(convert_date_with_timezone(date_string).map(Field::Timestamp)?)
+            Ok(utc_datetime.map(Field::Timestamp)?)
         }
         Type::DATE => {
             let date: NaiveDate = NaiveDate::parse_from_str(
@@ -227,9 +237,48 @@ macro_rules! conversion_fn {
 
 conversion_fn!(convert_bool, Field::Boolean);
 conversion_fn!(convert_string, Field::String);
-conversion_fn!(convert_timestamp, |v: NaiveDateTime| Field::Timestamp(
-    v.and_utc().fixed_offset()
-));
+// conversion_fn!(convert_timestamp, |v: NaiveDateTime| Field::Timestamp(
+//     v.and_utc().fixed_offset()
+// ));
+// fn convert_timestamp(timezone: Tz) -> ConversionFn {
+//     fn _convert_timestamp(row: &Row, idx: usize) -> Result<Field, PostgresSchemaError> {
+//         row.try_get(idx).map(|datetime| {
+//             convert_date_given_timezone(datetime, timezone).map(Field::Timestamp)?
+//         }).or_else(handle_error)
+//     }
+// }
+
+// fn convert_timestamp(timezone: Tz) -> ConversionFn {
+//     let conversion_fn = move |row: &Row, idx: usize| -> Result<Field, PostgresSchemaError> {
+//         let datetime = row.try_get(idx)
+//             .and_then(|naive_datetime| convert_date_given_timezone(naive_datetime, &timezone))
+//             .or_else(|e: DateConversionError| Err(PostgresSchemaError::ValueConversionError(e.to_string())));
+//         datetime.map(Field::Timestamp)
+//     };
+
+//     Box::new(conversion_fn) as ConversionFn
+// }
+
+fn convert_timestamp(timezone: Tz) -> ConversionFn {
+    let conversion_fn: ConversionFn = move |row: &Row, idx: usize| -> Result<Field, PostgresSchemaError> {
+        let datetime: Result<NaiveDateTime, _> = row.try_get(idx);
+
+        match datetime {
+            Ok(naive_datetime) => {
+                let converted_datetime = convert_date_given_timezone(naive_datetime, &timezone)?;
+                Ok(Field::Timestamp(converted_datetime))
+            }
+            Err(err) => Err(PostgresSchemaError::ValueConversionError(err.to_string().into())),
+        }
+    };
+
+    conversion_fn
+}
+
+
+
+
+
 conversion_fn!(convert_timestamptz, Field::Timestamp);
 conversion_fn!(convert_date_snapshot, Field::Date);
 conversion_fn!(convert_binary, Field::Binary);
@@ -290,7 +339,7 @@ fn convert_uuid(row: &Row, idx: usize) -> Result<Field, PostgresSchemaError> {
 
 type ConversionFn = fn(&Row, usize) -> Result<Field, PostgresSchemaError>;
 
-pub fn get_conversion_fn(col_type: &Type) -> Result<ConversionFn, PostgresSchemaError> {
+pub fn get_conversion_fn(col_type: &Type, timezone: Tz) -> Result<ConversionFn, PostgresSchemaError> {
     match col_type {
         &Type::BOOL => Ok(convert_bool),
         &Type::INT2 => Ok(convert_int2),
@@ -301,7 +350,7 @@ pub fn get_conversion_fn(col_type: &Type) -> Result<ConversionFn, PostgresSchema
         }
         &Type::FLOAT4 => Ok(convert_float),
         &Type::FLOAT8 => Ok(convert_double),
-        &Type::TIMESTAMP => Ok(convert_timestamp),
+        &Type::TIMESTAMP => Ok(convert_timestamp(timezone)),
         &Type::TIMESTAMPTZ => Ok(convert_timestamptz),
         &Type::NUMERIC => Ok(convert_decimal),
         &Type::DATE => Ok(convert_date_snapshot),
@@ -368,7 +417,9 @@ pub fn convert_column_to_field(column: &Column) -> Result<FieldDefinition, Postg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dozer_ingestion_connector::dozer_types::{chrono::NaiveDate, json_types::json};
+    use dozer_ingestion_connector::dozer_types::{
+        chrono::NaiveDate, chrono_tz::UTC, json_types::json,
+    };
 
     #[macro_export]
     macro_rules! test_conversion {
@@ -381,6 +432,7 @@ mod tests {
                     r#type: $b,
                     column_index: 0,
                 },
+                &UTC,
             );
             assert_eq!(value.unwrap(), $c);
         };
@@ -532,6 +584,7 @@ mod tests {
                 r#type: Type::VARCHAR,
                 column_index: 0,
             },
+            &UTC,
         );
         assert_eq!(value.unwrap(), Field::Null);
     }

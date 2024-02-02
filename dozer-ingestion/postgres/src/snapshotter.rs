@@ -1,7 +1,6 @@
 use dozer_ingestion_connector::{
     dozer_types::{
-        models::ingestion_types::IngestionMessage,
-        types::{Operation, Schema},
+        chrono_tz::Tz, models::ingestion_types::IngestionMessage, types::{Operation, Schema}
     },
     futures::StreamExt,
     tokio::{
@@ -25,6 +24,7 @@ pub struct PostgresSnapshotter<'a> {
     pub ingestor: &'a Ingestor,
     pub schema: Option<String>,
     pub batch_size: usize,
+    pub timezone: Tz,
 }
 
 impl<'a> PostgresSnapshotter<'a> {
@@ -43,6 +43,7 @@ impl<'a> PostgresSnapshotter<'a> {
         table_index: usize,
         conn_config: tokio_postgres::Config,
         batch_size: usize,
+        timezone: Tz,
         sender: Sender<Result<(usize, Operation), PostgresConnectorError>>,
     ) -> Result<(), PostgresConnectorError> {
         let mut client_plain = connection_helper::connect(conn_config).await?;
@@ -62,7 +63,7 @@ impl<'a> PostgresSnapshotter<'a> {
         let columns = stmt.columns();
         let conversions: Vec<_> = columns
             .iter()
-            .map(|col| get_conversion_fn(col.type_()))
+            .map(|col| get_conversion_fn(col.type_(), timezone))
             .collect::<Result<Vec<_>, _>>()?;
 
         let empty_vec: Vec<String> = Vec::new();
@@ -116,6 +117,7 @@ impl<'a> PostgresSnapshotter<'a> {
         let (tx, mut rx) = channel(16);
 
         let mut joinset = JoinSet::new();
+        let timezone = self.timezone.clone();
         for (table_index, (schema, table)) in schemas.into_iter().zip(tables).enumerate() {
             let schema = schema?;
             let schema = schema.schema;
@@ -132,6 +134,7 @@ impl<'a> PostgresSnapshotter<'a> {
                     table_index,
                     conn_config,
                     batch_size,
+                    timezone,
                     sender.clone(),
                 )
                 .await
@@ -191,7 +194,7 @@ impl<'a> PostgresSnapshotter<'a> {
 mod tests {
     use std::time::Duration;
 
-    use dozer_ingestion_connector::{tokio, utils::ListOrFilterColumns, IngestionConfig, Ingestor};
+    use dozer_ingestion_connector::{dozer_types::chrono_tz::UTC, tokio, utils::ListOrFilterColumns, IngestionConfig, Ingestor};
     use rand::Rng;
     use serial_test::serial;
 
@@ -232,6 +235,7 @@ mod tests {
             ingestor: &ingestor,
             schema: None,
             batch_size: 1000,
+            timezone: UTC,
         };
 
         snapshotter.sync_tables(&input_tables).await.unwrap();
@@ -280,6 +284,7 @@ mod tests {
             ingestor: &ingestor,
             schema: None,
             batch_size: 1000,
+            timezone: UTC,
         };
 
         let actual = snapshotter.sync_tables(&input_tables).await;
@@ -312,6 +317,7 @@ mod tests {
             ingestor: &ingestor,
             schema: None,
             batch_size: 1000,
+            timezone: UTC,
         };
 
         let actual = snapshotter.sync_tables(&input_tables).await;

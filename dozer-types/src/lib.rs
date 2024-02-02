@@ -23,6 +23,7 @@ pub use arrow_cast;
 pub use bincode;
 pub use bytes;
 pub use chrono;
+pub use chrono_tz;
 pub use geo;
 pub use indexmap;
 pub use indicatif;

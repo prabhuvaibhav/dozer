@@ -1,5 +1,6 @@
 use dozer_ingestion_connector::dozer_types::bytes;
 use dozer_ingestion_connector::dozer_types::chrono::{TimeZone, Utc};
+use dozer_ingestion_connector::dozer_types::chrono_tz::Tz;
 use dozer_ingestion_connector::dozer_types::log::{error, info};
 use dozer_ingestion_connector::dozer_types::models::ingestion_types::IngestionMessage;
 use dozer_ingestion_connector::dozer_types::node::OpIdentifier;
@@ -43,6 +44,7 @@ impl<'a> CDCHandler<'a> {
     pub async fn start(
         &mut self,
         tables: Vec<PostgresTableInfo>,
+        timezone: &Tz,
     ) -> Result<(), PostgresConnectorError> {
         let replication_conn_config = self.replication_conn_config.clone();
         let client = helper::connect(replication_conn_config).await?;
@@ -100,7 +102,7 @@ impl<'a> CDCHandler<'a> {
                         .unwrap();
                 }
             } else {
-                self.handle_replication_message(message, &mut mapper)
+                self.handle_replication_message(message, &mut mapper, timezone)
                     .await?;
             }
         }
@@ -110,11 +112,12 @@ impl<'a> CDCHandler<'a> {
         &mut self,
         message: Option<Result<ReplicationMessage<LogicalReplicationMessage>, Error>>,
         mapper: &mut XlogMapper,
+        timezone: &Tz,
     ) -> Result<(), PostgresConnectorError> {
         match message {
             Some(Ok(XLogData(body))) => {
                 let lsn = body.wal_start();
-                let message = mapper.handle_message(body)?;
+                let message = mapper.handle_message(body, timezone)?;
 
                 match message {
                     Some(MappedReplicationMessage::Commit(lsn)) => {

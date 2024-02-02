@@ -8,6 +8,7 @@ edition = "2021"
 
 [dependencies]
 chrono = { version = "0.4.23", features = ["serde"] }
+chrono-tz = "0.8.5"
 serde = { version = "1.0.189", features = ["derive", "rc"] }
 serde_json = { version = "1.0.108", features = ["arbitrary_precision"] }
 ijson = "0.1.3"
